@@ -1,0 +1,1058 @@
+---
+title: "Lowland Organic Upland Abrupt Thaw Model using FME as reported by Turetsky et al. (2019) Nature Biogeosciences"
+author: "Merritt Turetsky"
+date: "June 15, 2019"
+output: pdf_document
+editor_options:
+  chunk_output_type: console
+  
+  DON'T FORGET TO GET RID OF OUTPUT FOLDER IN WRITE CSV STATEMENTS.  RUN SENSITIVITY ANALYSIS FIRST AND THEN SEE IF THIS IS WHAT IS CAUSING PROBLEMS, REMOVING THIS FOLDER
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, error = FALSE,
+                      fig.align = "center",
+                      collapse = TRUE, comment = "#>")
+```
+
+```{r libraries}
+library(tidyverse)
+library(FME)
+library(stringr)
+```
+
+# Variable Names
+- *undisturbed* - permafrost peatland pre-disturbance or 1000 years post thermokarst
+- *collapse_scar* - active thermokarst wetland formed 1-100 years post thermokarst
+- *young_lake* - active thermokarst lake formed 1-100 years post thermokarst
+- *bog* - stabilized thermokarst wetland formed through autogenic succession and drying of collapse scars 100-1000 years post thermokarst or from drying or drainage of old lakes after 100 yrs
+- *fen* - wetland formed from bogs due to deeper thaw and connection to groundwater
+- *shallow_soil* - Delta dhallow soil organic carbon pool (g C m-2 yr-1)
+- *deep_soil* - Delta deep soil organic carbon pool (g C m-2 yr-1)
+- *veg* - Delta vegetation carbon (g C m-2 yr-1), assumed here to be zero
+- *CH4* - Methane emissions (g C-CH4 m-2 yr-1)
+- *NEE* - Net ecosystem exchange (g C m-2 yr-1)
+- *DOC* - Dissolved organic carbon export Flux (g C m-2 yr-1)
+- *undisturbed_0* - starting area of permafrost peatland
+- *collapse_scar_0* - starting area of active thermokarst
+- *young_lake_0* - starting area of active thermokarst lake
+- *bog_0* - starting area of stabilized thermokarst wetland/drained lake 
+- *fen_0* - starting area of fen 
+- *a* - rate at which permafrost peatland area is converted to active thermokarst wetland or lake
+- *b* - rate at which active thermokarst lake is converted to stabilized thermokarst wetland/lake
+- *c* - rate at which active thermokarst wetland is converted to stabilized thermokarst wetland
+- *d* - rate at which stabilized thermokarst wetland is converted to fen
+- *e* - rate at which thermokarst wetland or fen reaccumulates permafrost
+
+Starting areas are defined within the function.
+
+*a* changes through time by increasing by an amount *a_dynamic* which is set as an input parameter. *b* also changes dynamically particularly in boreal regions to reflect future increases in lake drainage.  *c* and *d* are fixed and are entered as input paramters to the function.
+
+#Wetland model
+##The order that these parameters are introduced is how subsequent lines of code will be calculated. The name of the variable doesn't imply a link to that variable in subsequent code.  Names don't matter, rather the order matters.
+```{r function}
+NECB_model <- function(pars, start_time, end_time) {
+  derivs <- function(time, y, pars) {
+    with(as.list(c(pars, y)), {
+      dundisturbed_boreal <- -2 * a_boreal * undisturbed_boreal + e_boreal * fen_boreal + e_boreal * bog_boreal
+      dyoung_lake_boreal <- a_boreal * undisturbed_boreal - b_boreal * young_lake_boreal
+      dcollapse_scar_boreal <- a_boreal * undisturbed_boreal - c_boreal * collapse_scar_boreal
+      dbog_boreal <- c_boreal * collapse_scar_boreal + b_boreal * young_lake_boreal - d_boreal * bog_boreal - e_boreal * bog_boreal
+      dfen_boreal <- d_boreal * bog_boreal - e_boreal * fen_boreal
+      da_boreal <- a_boreal_dynamic
+      db_boreal <- b_boreal_dynamic
+      dc_boreal <- c_boreal_dynamic
+      dundisturbed_boreal_NECB <- ((undisturbed_boreal * 1e6 * (undisturbed_NEE + undisturbed_CH4 + undisturbed_DOC))) / 1e15
+      dyoung_lake_boreal_NECB <- ((young_lake_boreal * 1e6 * (young_lake_NEE + young_lake_CH4 + young_lake_DOC))) / 1e15
+      dcollapse_scar_boreal_NECB <- ((collapse_scar_boreal * 1e6 * (collapse_scar_NEE + collapse_scar_CH4 + collapse_scar_DOC))) / 1e15
+      dbog_boreal_NECB <- ((bog_boreal * 1e6 * (bog_NEE + bog_CH4 + bog_DOC))) / 1e15
+      dfen_boreal_NECB <- ((fen_boreal * 1e6 * (fen_NEE + fen_CH4 + fen_DOC))) / 1e15
+      dTotal_boreal_NECB <- dundisturbed_boreal_NECB + dyoung_lake_boreal_NECB + dcollapse_scar_boreal_NECB + dbog_boreal_NECB + dfen_boreal_NECB
+      
+      dCH4_boreal <- (((undisturbed_boreal * 1e6 * (undisturbed_CH4))) / 1e15) + (((young_lake_boreal * 1e6 * (young_lake_CH4))) / 1e15) + (((collapse_scar_boreal * 1e6 * (collapse_scar_CH4))) / 1e15) + (((bog_boreal * 1e6 * (bog_CH4))) / 1e15) + (((fen_boreal * 1e6 * (fen_CH4))) / 1e15)
+      
+      dCO2_boreal <- (((undisturbed_boreal * 1e6 * (undisturbed_NEE))) / 1e15) + (((young_lake_boreal * 1e6 * (young_lake_NEE))) / 1e15) + (((collapse_scar_boreal * 1e6 * (collapse_scar_NEE))) / 1e15) + (((bog_boreal * 1e6 * (bog_NEE))) / 1e15) + (((fen_boreal * 1e6 * (fen_NEE))) / 1e15)
+
+       # start of tundra calculations
+      dundisturbed_tundra <- -2 * a_tundra * undisturbed_tundra + e_tundra * fen_tundra + e_tundra * bog_tundra
+      dyoung_lake_tundra <- a_tundra * undisturbed_tundra - b_tundra * young_lake_tundra
+      dcollapse_scar_tundra <- undisturbed_tundra * a_tundra - collapse_scar_tundra * c_tundra
+      dbog_tundra <- c_tundra * collapse_scar_tundra + b_tundra * young_lake_tundra - d_tundra * bog_tundra - e_tundra * bog_tundra
+      dfen_tundra <- d_tundra * bog_tundra - e_tundra * fen_tundra
+      da_tundra <- a_tundra_dynamic
+      db_tundra <- b_tundra_dynamic
+      dc_tundra <- c_tundra_dynamic
+      dundisturbed_tundra_NECB <- ((undisturbed_tundra * 1e6 * (undisturbed_NEE + undisturbed_CH4 + undisturbed_DOC))) / 1e15
+      dyoung_lake_tundra_NECB <- ((young_lake_tundra * 1e6 * (young_lake_NEE + young_lake_CH4 + young_lake_DOC))) / 1e15
+      dcollapse_scar_tundra_NECB <- ((collapse_scar_tundra * 1e6 * (collapse_scar_NEE + collapse_scar_CH4 + collapse_scar_DOC))) / 1e15
+      dbog_tundra_NECB <- ((bog_tundra * 1e6 * (bog_NEE + bog_CH4 + bog_DOC))) / 1e15
+      dfen_tundra_NECB <- ((fen_tundra * 1e6 * (fen_NEE + fen_CH4 + fen_DOC))) / 1e15
+      dTotal_tundra_NECB <- dundisturbed_tundra_NECB + dyoung_lake_tundra_NECB + dcollapse_scar_tundra_NECB + dbog_tundra_NECB + dfen_tundra_NECB
+
+      dCH4_tundra <- (((undisturbed_tundra * 1e6 * (undisturbed_CH4))) / 1e15) + (((young_lake_tundra * 1e6 * (young_lake_CH4))) / 1e15) + (((collapse_scar_tundra * 1e6 * (collapse_scar_CH4))) / 1e15) + (((bog_tundra * 1e6 * (bog_CH4))) / 1e15) + (((fen_tundra * 1e6 * (fen_CH4))) / 1e15)
+      
+      dCO2_tundra <- (((undisturbed_tundra * 1e6 * (undisturbed_NEE))) / 1e15) + (((young_lake_tundra * 1e6 * (young_lake_NEE))) / 1e15) + (((collapse_scar_tundra * 1e6 * (collapse_scar_NEE))) / 1e15) + (((bog_tundra * 1e6 * (bog_NEE))) / 1e15) + (((fen_tundra * 1e6 * (fen_NEE))) / 1e15)
+      
+      #start of combined calculations
+      dfen_NECB <- dfen_boreal_NECB + dfen_tundra_NECB
+  
+      dbog_NECB <- dbog_boreal_NECB + dbog_tundra_NECB
+  
+      dcollapse_scar_NECB <- dcollapse_scar_boreal_NECB + dcollapse_scar_tundra_NECB
+  
+      dyoung_lake_NECB <- dyoung_lake_boreal_NECB + dyoung_lake_tundra_NECB
+  
+      dundisturbed_NECB <- dundisturbed_boreal_NECB + dundisturbed_tundra_NECB
+
+      dTotal_NECB <- dundisturbed_tundra_NECB + dyoung_lake_tundra_NECB + dcollapse_scar_tundra_NECB + dbog_tundra_NECB + dfen_tundra_NECB + dundisturbed_boreal_NECB + dyoung_lake_boreal_NECB + dcollapse_scar_boreal_NECB + dbog_boreal_NECB + dfen_boreal_NECB
+      
+      dCH4 <- dCH4_tundra + dCH4_boreal
+      dCO2 <- dCO2_tundra + dCO2_boreal
+
+      return(list(c(
+        dundisturbed_boreal,
+        dyoung_lake_boreal,
+        dcollapse_scar_boreal,
+        dbog_boreal,
+        dfen_boreal,
+        da_boreal,
+        db_boreal,
+        dc_boreal,
+        dundisturbed_boreal_NECB,
+        dyoung_lake_boreal_NECB,
+        dcollapse_scar_boreal_NECB,
+        dbog_boreal_NECB,
+        dfen_boreal_NECB,
+        dTotal_boreal_NECB,
+        dCH4_boreal,
+        dCO2_boreal,
+        dundisturbed_tundra,
+        dyoung_lake_tundra,
+        dcollapse_scar_tundra,
+        dbog_tundra,
+        dfen_tundra,
+        da_tundra,
+        db_tundra,
+        dc_tundra,
+        dundisturbed_tundra_NECB,
+        dyoung_lake_tundra_NECB,
+        dcollapse_scar_tundra_NECB,
+        dbog_tundra_NECB,
+        dfen_tundra_NECB,
+        dTotal_tundra_NECB,
+        dCH4_tundra,
+        dCO2_tundra,
+        dundisturbed_NECB,
+        dyoung_lake_NECB,
+        dcollapse_scar_NECB,
+        dbog_NECB,
+        dfen_NECB,
+        dTotal_NECB,
+        dCH4,
+        dCO2
+      )))
+    })
+  }
+  # initial conditions
+  y <- with(as.list(pars), {
+      c(
+        undisturbed_boreal = undisturbed_boreal_0,
+        young_lake_boreal = young_lake_boreal_0,
+        collapse_scar_boreal = collapse_scar_boreal_0,
+        bog_boreal = bog_boreal_0,
+        fen_boreal = fen_boreal_0,
+        a_boreal = a_boreal_0,
+        b_boreal = b_boreal_0,
+        c_boreal = c_boreal_0,
+        undisturbed_boreal_NECB = undisturbed_boreal_NECB_0,
+        young_lake_boreal_NECB = young_lake_boreal_NECB_0,
+        collapse_scar_boreal_NECB = collapse_scar_boreal_NECB_0,
+        bog_boreal_NECB = bog_boreal_NECB_0,
+        fen_boreal_NECB = fen_boreal_NECB_0,
+        Total_boreal_NECB = Total_boreal_NECB_0,
+        CH4_boreal = CH4_boreal_0,
+        CO2_boreal = CO2_boreal_0,
+        undisturbed_tundra = undisturbed_tundra_0,
+        young_lake_tundra = young_lake_tundra_0,
+        collapse_scar_tundra = collapse_scar_tundra_0,
+        bog_tundra = bog_tundra_0,
+        fen_tundra = fen_tundra_0,
+        a_tundra = a_tundra_0,
+        b_tundra = b_tundra_0,
+        c_tundra = c_tundra_0,
+        undisturbed_tundra_NECB = undisturbed_tundra_NECB_0,
+        young_lake_tundra_NECB = young_lake_tundra_NECB_0,
+        collapse_scar_tundra_NECB = collapse_scar_tundra_NECB_0,
+        bog_tundra_NECB = bog_tundra_NECB_0,
+        fen_tundra_NECB = fen_tundra_NECB_0,
+        Total_tundra_NECB = Total_tundra_NECB_0,
+        CH4_tundra = CH4_tundra_0,
+        CO2_tundra = CO2_tundra_0,
+        
+        undisturbed_NECB = undisturbed_NECB_0,
+        young_lake_NECB = young_lake_NECB_0,
+        collapse_scar_NECB = collapse_scar_NECB_0,
+        bog_NECB = bog_NECB_0,
+        fen_NECB = fen_NECB_0,
+        
+        Total_NECB = Total_NECB_0,
+        CH4 = CH4_0,
+        CO2 = CO2_0
+      )
+    })
+ times <- start_time:end_time
+  out <- ode(y = y, parms = pars, times = times, func = derivs)
+  as.data.frame(out)
+}
+```
+
+# Parameter Values for Static Wetland Model 
+##This code is used as an informal means of model spin up, mainly so that CO2 and CH4 release from these thaw landscapes do not start at 0 at the beginning of our dynamic measurement period.  In the results reported in Turetsky et al. (2019) we substract carbon emissions from 1900-2000 from our results and focus mainly on emissions from 2000-2300.  Parameters in the historical model run were fitted so that abrupt thaw rates approximated an equilibrium with permafrost recovery at the regional scale. This allows us to explore net ecosystem carbon balance at regional scales under these equilibrium conditions, and then compare changes in net ecosystem carbon balance under accelerated thaw rates in the dynamic measurement period.
+##Dynamic increases in transition rates are set to zero in this simulation
+```{r values for historical measurement period}
+wetland_pars_historical <- c(
+  a_boreal_0 = 0.0009,
+  a_boreal_dynamic = 0.0,
+  b_boreal_0 = 0.005, 
+  b_boreal_dynamic = 0.0,
+  c_boreal_0 = 0.0066,
+  c_boreal_dynamic = 0,
+  d_boreal = 0.002,
+  e_boreal = 0.0005,
+  undisturbed_boreal_0 = 523500, 
+  young_lake_boreal_0 = 40000, 
+  collapse_scar_boreal_0 = 55350,
+  bog_boreal_0 = 209400,
+  fen_boreal_0= 209400,
+  undisturbed_boreal_NECB_0 = 0,
+  young_lake_boreal_NECB_0 = 0,
+  old_lake_boreal_NECB_0 = 0,
+  collapse_scar_boreal_NECB_0 = 0,
+  bog_boreal_NECB_0 = 0,
+  fen_boreal_NECB_0 = 0,
+  Total_boreal_NECB_0 = 0,
+          undisturbed_shallow_soil = 19, 
+          undisturbed_deep_soil = 0, 
+          undisturbed_veg = 0, 
+          undisturbed_NEE=19,
+          undisturbed_CH4=0,
+          undisturbed_DOC=0,
+          young_lake_shallow_soil = -200, 
+          young_lake_deep_soil = 0, 
+          young_lake_veg = 0, 
+          young_lake_NEE= (-450*.4)+(-150*.6), 
+          young_lake_CH4=(-130*.4)+(-38*.6), 
+          young_lake_DOC=0,
+          collapse_scar_shallow_soil = 117, 
+          collapse_scar_deep_soil = -547, 
+          collapse_scar_veg = 0,
+          collapse_scar_NEE=-417,
+          collapse_scar_CH4=-13,
+          collapse_scar_DOC=0,
+          bog_shallow_soil = 65, 
+          bog_deep_soil = -13.16, 
+          bog_veg = 0,
+          bog_NEE=53,
+          bog_CH4=1,
+          bog_DOC=0,
+          fen_shallow_soil = 49.5, 
+          fen_deep_soil = 0, 
+          fen_veg = 0,
+          fen_NEE=60,
+          fen_CH4=-34,
+          fen_DOC=0,
+          CH4_boreal_0 = 0,
+          CO2_boreal_0 = 0,
+         
+  a_tundra_0 = 0.0007,
+  a_tundra_dynamic = 0.0, 
+  b_tundra_0 = 0.005, 
+  b_tundra_dynamic = 0,
+  c_tundra_0 = 0.0066, 
+  c_tundra_dynamic = 0,
+  d_tundra = 0.002,
+  e_tundra = 0.001, 
+  undisturbed_tundra_0 = 193500, 
+  young_lake_tundra_0 = 10000, 
+  collapse_scar_tundra_0 = 19350,
+  bog_tundra_0 = 77400,
+  fen_tundra_0= 77400,
+  
+  undisturbed_tundra_NECB_0 = 0,
+  young_lake_tundra_NECB_0 = 0,
+  collapse_scar_tundra_NECB_0 = 0,
+  bog_tundra_NECB_0 = 0,
+  fen_tundra_NECB_0 = 0,
+  Total_tundra_NECB_0 = 0,
+  CH4_tundra_0 = 0,
+  CO2_tundra_0 = 0,
+
+  undisturbed_NECB_0 = 0,
+  young_lake_NECB_0 = 0,
+  collapse_scar_NECB_0 = 0,
+  bog_NECB_0 = 0,
+  fen_NECB_0 = 0,
+  Total_NECB_0 = 0,
+  CH4_0 = 0,
+  CO2_0 = 0
+)
+```
+
+#Run Static/Historical Wetland Model
+##End point = initial conditions for next model
+```{r run historical measurement period}
+wetland_out_historical <- NECB_model(pars = wetland_pars_historical, start_time = 1900, end_time = 2000)
+end_values <- filter(wetland_out_historical, time == 2000) %>% 
+  select(-time)
+```
+
+# Parameter Values for Dynamic Wetland Model 
+##This includes a dynamic increase in thaw rate to simulate the effects of climate change on permafrost area. The dynamic increase in thaw rate is a_dynamic, which was fitted so that the cumulative change in permafrost area by 2300 matched that of large scale modeling of gradual thaw reported in McGuire et al. 2018.
+##In Turetsky et al. (2019), the RCP8.5 scenario used an *a_dynamic* of 0.001 and xxxx for boreal and tundra, respectively.  The RCP4.5 scenario used an *a_dynamic* of XXXXX and yyyy for boreal and tundra, respectively.
+##This code pulls starting values from the end of the 'historical' run of the model
+```{r values for dynamic measurement period}
+wetland_pars <- c(
+  a_boreal_0 = 0.003,
+  a_boreal_dynamic = 0.00001,
+  b_boreal_0 = 0.005, 
+  b_boreal_dynamic = 0.00004,
+  c_boreal_0 = 0.0066,  
+  c_boreal_dynamic = 0.00000,
+  d_boreal = 0.002, 
+  e_boreal = 0.001, 
+  undisturbed_boreal_0 = end_values$undisturbed_boreal, 
+  young_lake_boreal_0 = end_values$young_lake_boreal, 
+  collapse_scar_boreal_0 = end_values$collapse_scar_boreal,
+  bog_boreal_0 = end_values$bog_boreal,
+  fen_boreal_0= end_values$fen_boreal,
+  undisturbed_boreal_NECB_0 = end_values$undisturbed_boreal_NECB,
+  young_lake_boreal_NECB_0 = end_values$young_lake_boreal_NECB,
+  old_lake_boreal_NECB_0 = end_values$old_lake_boreal_NECB,
+  collapse_scar_boreal_NECB_0 = end_values$collapse_scar_boreal_NECB,
+  bog_boreal_NECB_0 = end_values$bog_boreal_NECB,
+  fen_boreal_NECB_0 = end_values$fen_boreal_NECB,
+  Total_boreal_NECB_0 = end_values$Total_boreal_NECB,
+  undisturbed_shallow_soil = 20.4, 
+  undisturbed_deep_soil = 0, 
+  undisturbed_veg = 0, 
+  undisturbed_NEE=20.4,
+  undisturbed_CH4=0,
+  undisturbed_DOC=0,
+  young_lake_shallow_soil = -198, 
+  young_lake_deep_soil = 0, 
+  young_lake_veg = 0, 
+  young_lake_NEE =(-450*.4)+(-150*.6), 
+  young_lake_CH4=(-130*.4)+(-38*.6), 
+  young_lake_DOC=0,
+  collapse_scar_shallow_soil = 115, 
+  collapse_scar_deep_soil = -550, 
+  collapse_scar_veg = 0,
+  collapse_scar_NEE=-422,
+  collapse_scar_CH4=-13,
+  collapse_scar_DOC=0,
+  bog_shallow_soil = 50, 
+  bog_deep_soil = -13, 
+  bog_veg = 0,
+  bog_NEE=50-13,
+  bog_CH4=-1,
+  bog_DOC=0,
+  fen_shallow_soil = 26.5, 
+  fen_deep_soil = 0, 
+  fen_veg = 0,
+  fen_NEE=60,
+  fen_CH4=-33.5,
+  fen_DOC=0,
+  CH4_boreal_0 = end_values$CH4_boreal,
+  CO2_boreal_0 = end_values$CO2_boreal,
+  
+  a_tundra_0 = 0.002,
+  a_tundra_dynamic = 0.000008, 
+  b_tundra_0 = 0.005,
+  b_tundra_dynamic = 0.00003,
+  c_tundra_0 = 0.0066, 
+  c_tundra_dynamic = 0.00000,
+  d_tundra = 0.002,
+  e_tundra = 0.001, 
+  undisturbed_tundra_0 = end_values$undisturbed_tundra, 
+  young_lake_tundra_0 = end_values$young_lake_tundra, 
+  collapse_scar_tundra_0 = end_values$collapse_scar_tundra,
+  bog_tundra_0 = end_values$bog_tundra,
+  fen_tundra_0= end_values$fen_tundra,
+  
+  undisturbed_tundra_NECB_0 = end_values$undisturbed_tundra_NECB,
+  young_lake_tundra_NECB_0 = end_values$young_lake_tundra_NECB,
+  collapse_scar_tundra_NECB_0 = end_values$collapse_scar_tundra_NECB,
+  bog_tundra_NECB_0 = end_values$bog_tundra_NECB,
+  fen_tundra_NECB_0 = end_values$fen_tundra_NECB,
+  Total_tundra_NECB_0 = end_values$Total_tundra_NECB,
+  CH4_tundra_0 = end_values$CH4_tundra,
+  CO2_tundra_0 = end_values$CO2_tundra,
+  
+  undisturbed_NECB_0 = end_values$undisturbed_NECB,
+  young_lake_NECB_0 = end_values$young_lake_NECB,
+  collapse_scar_NECB_0 = end_values$collapse_scar_NECB,
+  bog_NECB_0 = end_values$bog_NECB,
+  fen_NECB_0 = end_values$fen_NECB,
+  Total_NECB_0 = end_values$Total_NECB,
+  CH4_0 = end_values$CH4,
+  CO2_0 = end_values$CO2
+)
+```
+
+#Run Dynamic Wetland Model
+
+```{r run dynamic measurement period}
+wetland_out_dynamic <- NECB_model(pars = wetland_pars, start_time = 2000, end_time = 2300)
+wetland_out<-rbind(wetland_out_historical %>% filter(time < 2000), 
+                   wetland_out_dynamic)
+```
+
+#Plot Model Results
+##transform the data into a more practical format
+##rename Und to Undisturbed, Young to Active, Old to Stabilized
+```{r model-ggplot2}
+wetland_model_tidy <- wetland_out %>% 
+  gather(variable, value, -time) %>% 
+  # rename Und to Undisturbed
+  mutate(
+    variable_name = variable,
+    variable_name = recode(variable_name,
+                           undisturbed_boreal = "Permafrost",
+                           young_lake_boreal = "Thermokarst lake",
+                           collapse_scar_boreal = "Young collapse scar",
+                           bog_boreal = "Mature collapse scar",
+                           fen_boreal = "Flowthrough fen",
+                           undisturbed_tundra = "Permafrost",
+                           young_lake_tundra = "Thermokarst lake",
+                           collapse_scar_tundra = "Young collapse scar",
+                           bog_tundra = "Mature collapse scar",
+                           fen_tundra = "Flowthrough fen"))
+write_csv(wetland_model_tidy, "wetland_model_tidy.csv")
+```
+
+#Plot Results of Changing Areas in Wetland Model
+```{r area-plots}
+# boreal area
+plot_vars <- c(undisturbed_boreal = "Permafrost",
+               young_lake_boreal = "Thermokarst lake",
+               collapse_scar_boreal = "Young collapse scar",
+               bog_boreal = "Mature collapse scar",
+               fen_boreal = "Flowthrough fen")
+plot_data <- wetland_model_tidy %>% 
+  filter(variable %in% names(plot_vars)) %>% 
+  mutate(variable_name = factor(variable_name, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable_name)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  scale_color_brewer(NULL, palette = "Set1") +
+  scale_y_continuous(label = scales::comma) +
+  labs(title = "Wetland thermokarst model",
+       subtitle = "Predicted changes in boreal area",
+       x = "Year", y = bquote("Boreal Area"~(km^2))) +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+# tundra area
+plot_vars <- c(undisturbed_tundra = "Permafrost",
+               young_lake_tundra = "Thermokarst lake",
+               collapse_scar_tundra = "Young collapse scar",
+               bog_tundra = "Mature collapse scar",
+               fen_tundra = "Flowthrough fen")
+plot_data <- wetland_model_tidy %>% 
+  filter(variable %in% names(plot_vars)) %>% 
+  mutate(variable_name = factor(variable_name, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable_name)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  scale_color_brewer(NULL, palette = "Set1") +
+  scale_y_continuous(label = scales::comma) +
+  labs(title = "Wetland thermokarst model",
+       subtitle = "Predicted changes in tundra area",
+       x = "Year", y = bquote("Tundra Area"~(km^2))) +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+```
+
+
+#Boreal and Tundra Combined
+```{r plot data combined for boreal and tundra}
+wetland_out<-wetland_out %>% 
+  mutate (total_fen = fen_boreal + fen_tundra,
+          total_undisturbed = undisturbed_boreal + undisturbed_tundra,
+          total_bog = bog_boreal + bog_tundra,
+          total_young_lake = young_lake_boreal + young_lake_tundra,
+          total_collapse_scar = collapse_scar_boreal + collapse_scar_tundra)
+
+wetland_model_tidy_total <- wetland_out %>% 
+  select(time, total_fen, total_undisturbed, total_collapse_scar, total_young_lake, total_bog) %>% 
+  
+gather(variable, value, -time) %>% 
+  mutate(
+    variable_name = variable,
+    variable_name = recode(variable_name,
+                           total_undisturbed = "Permafrost",
+                           total_young_lake = "Active thaw lake",
+                           total_collapse_scar = "Active thaw wetland",
+                           total_bog = "Mature thaw wetland/lake",
+                           total_fen = "Flowthrough fen"))
+
+write_csv(wetland_model_tidy_total, "wetland_model_tidy_total.csv")
+
+plot_vars <- c(total_undisturbed = "Permafrost",
+               total_young_lake = "Active thaw lake",
+               total_collapse_scar = "Active thaw wetland",
+               total_bog = "Mature thaw wetland/lake",
+               total_fen = "Flowthrough fen")
+plot_data <- wetland_model_tidy_total %>% 
+  filter(variable %in% names(plot_vars)) %>% 
+  mutate(variable_name = factor(variable_name, levels = plot_vars))
+wetland_area_fig<- ggplot(plot_data, aes(x = time, y = value, color = variable_name)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  scale_color_brewer(NULL, palette = "Set1") +
+  scale_y_continuous(label = scales::comma) +
+  labs(x = "Year", y = bquote("Organic Lowland Area"~(km^2))) +
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=22),
+        legend.text = element_text(size=18),
+        legend.position= c(0.68, 0.99),
+        plot.margin = margin(.8, .8, .8, .8, "cm"),
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+print(wetland_area_fig)
+
+pdf(file="wetland_area_fig.pdf", width=9, height=6, family="Helvetica")
+wetland_area_fig
+dev.off()
+
+
+ggplot(data = wetland_out, mapping = aes(x = time, y = a_boreal)) +
+  geom_line(data = filter(wetland_out, time >= 2000), color="red") +
+  geom_line(aes(x=time, y=a_tundra), data = filter(wetland_out, time >= 2000), color="blue") +
+  labs(x = "Year", y = "Change in thaw rate") +
+  
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+  
+
+```
+
+
+#Plot Results of Model NECB
+```{r plot NECB results}
+# boreal
+plot_vars <- c("undisturbed_boreal_NECB", "young_lake_boreal_NECB", 
+               "collapse_scar_boreal_NECB", 
+               "bog_boreal_NECB", "fen_boreal_NECB", "Total_boreal_NECB")
+plot_lbls <- c("Permafrost peatland", "Young lake", "Collapse scar", 
+               "Bog", "Fen", "Total")
+plot_data <- wetland_model_tidy %>% 
+  # subset to variables of interest
+  filter(variable %in% plot_vars) %>% 
+  # convert to factor to set legend ordering
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  geom_hline(yintercept = 0) +
+  # choose nicer, non-default colours
+  scale_color_brewer(NULL, palette = "Set1", breaks = plot_vars, 
+                     labels = plot_lbls) +
+  labs(title = "Wetland thermokarst boreal Net Ecosystem Carbon Balance (NECB)",
+       subtitle = "Predicted changes in NECB",
+       x = "Year", y = "Cumulative Boreal NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+# tundra
+plot_vars <- c("undisturbed_tundra_NECB", "young_lake_tundra_NECB", 
+               "collapse_scar_tundra_NECB", 
+               "bog_tundra_NECB", "fen_tundra_NECB", "Total_tundra_NECB")
+plot_lbls <- c("Permafrost peatland", "Young lake", "Collapse scar", 
+               "Bog", "Fen", "Total")
+plot_data <- wetland_model_tidy %>% 
+  # subset to variables of interest
+  filter(variable %in% plot_vars) %>% 
+  # convert to factor to set legend ordering
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  geom_hline(yintercept = 0) +
+  # choose nicer, non-default colours
+  scale_color_brewer(NULL, palette = "Set1", breaks = plot_vars, 
+                     labels = plot_lbls) +
+  labs(title = "Wetland thermokarst arctic Net Ecosystem Carbon Balance (NECB)",
+       subtitle = "Predicted changes in NECB",
+       x = "Year", y = "Cumulative Arctic NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+#combined by ecosystem state
+plot_vars <- c("undisturbed_NECB", "young_lake_NECB", 
+               "collapse_scar_NECB", 
+               "bog_NECB", "fen_NECB")
+plot_lbls <- c("Permafrost peatland", "Active thaw lake", "Active thaw wetland", 
+               "Mature thaw wetland/lake", "Flow-through fen")
+plot_data <- wetland_model_tidy %>% 
+  filter(variable %in% plot_vars) %>% 
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  geom_hline(yintercept = 0) +
+  scale_color_brewer(NULL, palette = "Set1", breaks = plot_vars, 
+                     labels = plot_lbls) +
+  labs(x = "Year", y = "Cumulative Net Ecosystem Carbon Balance (Pg C)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+# combined total NECB
+plot_vars <- c("Total_NECB", "Total_tundra_NECB", "Total_boreal_NECB")
+plot_lbls <- c("Total", "Arctic", "Boreal")
+plot_data <- wetland_model_tidy %>% 
+  filter(variable %in% plot_vars) %>% 
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  geom_hline(yintercept = 0) +
+  scale_color_brewer(NULL, palette = "Set1", breaks = plot_vars, 
+                     labels = plot_lbls) +
+  labs(title = "Wetland thermokarst Net Ecosystem Carbon Balance (NECB)",
+       subtitle = "Predicted changes in NECB",
+       x = "Year", y = "Cumulative NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+
+# Plot Results of CO2 and CH4 from the entire terrain
+##Combine $CO_2$ and $CH_4$ for boreal and arctic
+```{r}
+co2_ch4 <- wetland_out %>% 
+  mutate(CO2 = CO2_boreal + CO2_tundra,
+         CH4 = CH4_boreal + CH4_tundra
+         ) %>% 
+  select(time, CO2, CH4, NECB = Total_NECB) %>% 
+  gather(variable, value, -time)
+plot_vars <- c("CO2", "CH4", "NECB")
+plot_data <- co2_ch4 %>% 
+  filter(variable %in% plot_vars) %>% 
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(size = 1.5, data = filter(plot_data, time >= 2000)) +
+  geom_hline(yintercept = 0) +
+  scale_color_brewer(NULL, palette = "Set1", breaks = plot_vars) +
+  labs(x = "Year", y = "Cumulative Lowland Organic CO2 or CH4 (Pg C)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+
+#Local Sensistivity Wetland Model
+##Run a local sensitivity analysis using a subset of parameters for total NECB. After running the sensitivity analysis, transform the data to a format more conducive to analysis and plotting
+##This model has been split into boreal and arctic components. In this analysis, I look at the sensitive of the total NECB variable to changes in boreal/arctic parameters. Note that some parameters have boreal/arctic versions (e.g. `a_boreal`/`a_tundra`), while others don't (e.g. `fen_NEE`).
+
+```{r local sensitivity boreal}
+# boreal sensitivity parameters
+sp <- c("b_boreal_0", "c_boreal_0", "d_boreal", "e_boreal", "undisturbed_boreal_0", 
+        "young_lake_boreal_0", "collapse_scar_boreal_0", 
+        "bog_boreal_0", "fen_boreal_0", "a_boreal_0", "a_boreal_dynamic", 
+        "undisturbed_NEE", "undisturbed_CH4", "young_lake_NEE", 
+        "young_lake_CH4", "collapse_scar_NEE", 
+        "collapse_scar_CH4", "bog_NEE", "bog_CH4", "fen_NEE", "fen_CH4")
+SnsThermokarst_b <- sensFun(func = NECB_model, parms = wetland_pars, 
+                            start_time = 1900, end_time = 2300,
+                            senspar = sp, 
+                            sensvar = "Total_NECB", varscale = -1)
+# transform
+boreal_loc_sens <- SnsThermokarst_b %>% 
+  gather(parameter, sensitivity, -x, -var) %>% 
+  rename(year = x, variable = var)
+write_csv(boreal_loc_sens, "wetland_local-sensitivity_boreal.csv")
+```
+
+#Average over years to produce a bar plot.
+```{r glbl-yr-avg-boreal}
+sens_summ_boreal <- bind_rows(
+  boreal_loc_sens %>% 
+    filter(variable == "Total_NECB", year >= 2000, year <= 2100) %>% 
+    group_by(parameter) %>% 
+    summarize(sens_mean = mean(sensitivity),
+              sens_se = sd(sensitivity) / n()) %>% 
+    mutate(period = "2000-2100"),
+  boreal_loc_sens %>% 
+    filter(variable == "Total_NECB", year >= 2000, year <= 2300) %>% 
+    group_by(parameter) %>% 
+    summarize(sens_mean = mean(sensitivity),
+              sens_se = sd(sensitivity) / n()) %>% 
+    mutate(period = "2000-2300")
+)
+ggplot(sens_summ_boreal, aes(x = parameter, y = sens_mean)) +
+  geom_point() +
+  coord_flip() +
+  facet_wrap(~ period) +
+  labs(x = "Sensitivity", y = "Parameter",
+       title = "Mean local sensitivity for wetland thermokarst NECB (Boreal)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+
+```{r local sensitivity tundra}
+# tundra sensitivity parameters
+sp <- c("b_tundra_0", "c_tundra_0", "d_tundra", "e_tundra", "undisturbed_tundra_0", 
+        "young_lake_tundra_0", "collapse_scar_tundra_0", 
+        "bog_tundra_0", "fen_tundra_0", "a_tundra_0", "a_tundra_dynamic", 
+        "undisturbed_NEE", "undisturbed_CH4", "young_lake_NEE", 
+        "young_lake_CH4", "collapse_scar_NEE", 
+        "collapse_scar_CH4", "bog_NEE", "bog_CH4", "fen_NEE", "fen_CH4")
+SnsThermokarst_t <- sensFun(func = NECB_model, parms = wetland_pars, 
+                            start_time=1900, end_time=2300, senspar = sp, 
+                          sensvar = "Total_NECB", varscale = -1)
+# transform
+tundra_loc_sens <- SnsThermokarst_t %>% 
+  gather(parameter, sensitivity, -x, -var) %>% 
+  rename(year = x, variable = var)
+write_csv(tundra_loc_sens, "wetland_local-sensitivity_tundra.csv")
+```
+
+#Average over years to produce a bar plot.
+```{r glbl-yr-avg-tundra}
+sens_summ_tundra <- bind_rows(
+  tundra_loc_sens %>% 
+    filter(variable == "Total_NECB", year >= 2000, year <= 2100) %>% 
+    group_by(parameter) %>% 
+    summarize(sens_mean = mean(sensitivity),
+              sens_se = sd(sensitivity) / n()) %>% 
+    mutate(period = "2000-2100"),
+  tundra_loc_sens %>% 
+    filter(variable == "Total_NECB", year >= 2000, year <= 2300) %>% 
+    group_by(parameter) %>% 
+    summarize(sens_mean = mean(sensitivity),
+              sens_se = sd(sensitivity) / n()) %>% 
+    mutate(period = "2000-2300")
+)
+ggplot(sens_summ_tundra, aes(x = parameter, y = sens_mean)) +
+  geom_point() +
+  coord_flip() +
+  facet_wrap(~ period) +
+  labs(x = "Sensitivity", y = "Parameter",
+       title = "Mean local sensitivity for wetland thermokarst NECB (Arctic)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+# Global Sensistivity wetland Model
+##This analysis considers uncertainties for the most important sensitivity parameters
+##Output is transformed and plotted in ggplot2.
+
+```{r uncertainty boreal}
+sense_pars_b <- c("a_boreal_0", "c_boreal_0", "b_boreal_0", "collapse_scar_boreal_0", "undisturbed_boreal_0")
+par_ranges_b <- wetland_pars[sense_pars_b] %>% 
+  enframe() %>% 
+  mutate(min = value - 0.4 * value, max = value + 0.4 * value) %>% 
+  select(min, max) %>% 
+  as.data.frame()
+rownames(par_ranges_b) <- sense_pars_b
+sR_b <- sensRange(func = NECB_model, parms = wetland_pars, 
+                  start_time=2000, end_time=2300, dist = "grid",
+                  sensvar = "Total_NECB", parRange = par_ranges_b, 
+                  num = 2^nrow(par_ranges_b))
+# tidy data
+boreal_glb_sens <- sR_b %>% 
+  gather(year, necb, -one_of(rownames(par_ranges_b))) %>% 
+  mutate(year = str_extract(year, "[0-9]+$") %>% parse_number()) %>% 
+  select(year, everything())
+
+# plot
+glb_sens_summ_boreal <- boreal_glb_sens %>% 
+  group_by(year) %>% 
+  summarize(necb_mean = mean(necb),
+            necb_min = min(necb), necb_max = max(necb),
+            necb_sd = sd(necb)) %>% 
+  ungroup() %>% 
+  mutate(necb_psd = necb_mean + necb_sd, necb_msd = necb_mean - necb_sd)
+write_csv(boreal_glb_sens, "wetland_global-sensitivity_boreal.csv")
+write_csv(glb_sens_summ_boreal, "wetland_global-sensitivity_boreal_summary.csv")
+ggplot(glb_sens_summ_boreal, aes(x = year)) +
+  # mean+-sd
+  geom_ribbon(aes(ymin = necb_msd, ymax = necb_psd), alpha = 0.2) +
+  # mean
+  geom_line(aes(y = necb_mean)) +
+  labs(title = "Uncertainty in Wetland Thermokarst NECB (Boreal)",
+       x = "Year", y = "NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+
+```{r uncertainty tundra}
+sense_pars_t <- c("a_tundra_0", "c_tundra_0", "collapse_scar_tundra_0", "undisturbed_tundra_0")
+par_ranges_t <- wetland_pars[sense_pars_t] %>% 
+  enframe() %>% 
+  mutate(min = value - 0.4 * value, max = value + 0.4 * value) %>% 
+  select(min, max) %>% 
+  as.data.frame()
+rownames(par_ranges_t) <- sense_pars_t
+sR_t <- sensRange(func = NECB_model, parms = wetland_pars, 
+                  start_time=2000, end_time=2300, dist = "grid",
+                  sensvar = "Total_NECB", parRange = par_ranges_t, 
+                  num = 2^nrow(par_ranges_t))
+# tidy data
+tundra_glb_sens <- sR_t %>% 
+  gather(year, necb, -one_of(rownames(par_ranges_t))) %>% 
+  mutate(year = str_extract(year, "[0-9]+$") %>% parse_number()) %>% 
+  select(year, everything())
+# plot
+glb_sens_summ_tundra <- tundra_glb_sens %>% 
+  group_by(year) %>% 
+  summarize(necb_mean = mean(necb),
+            necb_min = min(necb), necb_max = max(necb),
+            necb_sd = sd(necb)) %>% 
+  ungroup() %>% 
+  mutate(necb_psd = necb_mean + necb_sd, necb_msd = necb_mean - necb_sd)
+write_csv(tundra_glb_sens, "wetland_global-sensitivity_tundra.csv")
+write_csv(glb_sens_summ_tundra, "wetland_global-sensitivity_tundra_summary.csv")
+ggplot(glb_sens_summ_tundra, aes(x = year)) +
+  # mean+-sd
+  geom_ribbon(aes(ymin = necb_msd, ymax = necb_psd), alpha = 0.2) +
+  # mean
+  geom_line(aes(y = necb_mean)) +
+  labs(title = "Uncertainty in Wetland Thermokarst NECB (Arctic)",
+       x = "Year", y = "NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+#Combined Uncertainty
+##Look at the sensitivity to the full set of boreal and arctic parameters. This takes a long time to run so we save the results.
+```{r uncertainty combined}
+# combined parameters
+p_unique <- par_ranges_t[!rownames(par_ranges_t) %in% rownames(par_ranges_b), ]
+par_ranges_c <- rbind(par_ranges_b, p_unique)
+f <- "wetland_global-sensitivity.rds"
+#if (!file.exists(f)) {
+  # sensitivity analysis
+  sR_c <- sensRange(func = NECB_model, parms = wetland_pars, 
+                    start_time = 2000, end_time = 2300, dist = "grid",
+                    sensvar = "Total_NECB", parRange = par_ranges_c, 
+                    num = 2^nrow(par_ranges_c))
+  saveRDS(sR_c, f)
+#}
+sR_c <- readRDS(f)
+# tidy data
+combined_glb_sens <- sR_c %>% 
+  gather(year, necb, -one_of(rownames(par_ranges_c))) %>% 
+  mutate(year = str_extract(year, "[0-9]+$") %>% parse_number()) %>% 
+  select(year, everything())
+# plot
+glb_sens_summ_combined <- combined_glb_sens %>% 
+  group_by(year) %>% 
+  summarize(necb_mean = mean(necb),
+            necb_min = min(necb), necb_max = max(necb),
+            necb_sd = sd(necb)) %>% 
+  ungroup() %>% 
+  mutate(necb_psd = necb_mean + necb_sd, necb_msd = necb_mean - necb_sd)
+write_csv(glb_sens_summ_combined, "wetland_global-sensitivity_summary.csv")
+ggplot(glb_sens_summ_combined, aes(x = year)) +
+  # mean+-sd
+  geom_ribbon(aes(ymin = necb_msd, ymax = necb_psd), alpha = 0.2) +
+  # mean
+  geom_line(aes(y = necb_mean)) +
+  labs(title = "Uncertainty in Wetland Thermokarst NECB",
+       x = "Year", y = "NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+# Take CH4 data from output of model and calculate radiative forcing
+## #CH_4 and CO_2 started in PgC/km2 terrain and now are converted to gC/m2
+## Fluxes need to be summed up across the area of interest (i.e. 900,900 km2) and expressed in kg; positive fluxes are net release to the atmosphere and negative fluxes are net uptake from the atmosphere. 
+## Ensure that fluxes are expressed in CO2 and CH4 (1 g C-CO2 = 44/12 g CO2; 1g C-CH4 = 16/12 g CH4.
+## Below we are calculating the rate of CH4 and CO2 inputs specific to a year.  This is to allow me to estimate instantaneous RF that takes into the account the current year's perturbation to the atmosphere plus the legacy of previous years.
+## length equals 300 yrs
+## n represents duration of model run up to 2300 in years
+## j is the cohort and i is the year of that cohort's effect
+## historic_CH4 starts at zero, effects are summed over time because we are taking one time step and adding in the next year's flux
+```{r radiative forcing}
+wetland_out$CH4 <- (wetland_out$CH4_boreal + wetland_out$CH4_tundra)
+wetland_out$CH4_kg<- wetland_out$CH4*10^12 * -1 * 16/12
+wetland_out$CO2 <- (wetland_out$CO2_boreal + wetland_out$CO2_tundra)
+wetland_out$CO2_kg<-wetland_out$CO2*10^12 * -1 * 44/12
+wetland_out$delta_CH4_kg[1]<-0
+wetland_out$delta_CO2_kg[1]<-0
+for (t in 2:length(wetland_out$time)){
+  wetland_out$delta_CH4_kg[t] = wetland_out$CH4_kg[t]-wetland_out$CH4_kg[t-1]
+  wetland_out$delta_CO2_kg[t] = wetland_out$CO2_kg[t]-wetland_out$CO2_kg[t-1]
+  
+}
+
+fCH4 <- 1.3          
+ACH4 <-  1.3e-13     
+LifeCH4 <- 12        
+n <- length(wetland_out$time)
+
+# RF METHANE
+for (i in 1:n) {
+  historic_CH4 <- 0
+  for (j in 1:i) {
+    historic_CH4 <- historic_CH4 + wetland_out$delta_CH4_kg[j] * exp((j - i) / LifeCH4) 
+  }
+  wetland_out$historic_CH4[i] <- historic_CH4
+  wetland_out$RFCH4[i] <- fCH4 * ACH4 * ((historic_CH4))
+  
+}
+
+# RF CARBON DIOXIDE
+fCO2 <- 1
+ACO2 <- 0.0198e-13    
+LifeCO2_1 <- 1e8
+LifeCO2_2 <- 421
+LifeCO2_3 <- 71
+LifeCO2_4 <- 21
+LifeCO2_5 <- 3.4
+
+n <- length(wetland_out$time)
+
+wetland_out$CO2_1 <- wetland_out$delta_CO2_kg * 0.176
+wetland_out$CO2_2 <- wetland_out$delta_CO2_kg * 0.138
+wetland_out$CO2_3 <- wetland_out$delta_CO2_kg * 0.186
+wetland_out$CO2_4 <- wetland_out$delta_CO2_kg * 0.242
+wetland_out$CO2_5 <- wetland_out$delta_CO2_kg * 0.259
+
+for (i in 1:n) {
+  historic_CO2_1 <- 0
+  historic_CO2_2 <- 0
+  historic_CO2_3 <- 0
+  historic_CO2_4 <- 0
+  historic_CO2_5 <- 0
+
+  for (j in 1:i) {
+    historic_CO2_1 <- historic_CO2_1 + exp((j - i) / LifeCO2_1) * wetland_out$CO2_1[j]
+    historic_CO2_2 <- historic_CO2_2 + exp((j - i) / LifeCO2_2) * wetland_out$CO2_2[j]
+    historic_CO2_3 <- historic_CO2_3 + exp((j - i) / LifeCO2_3) * wetland_out$CO2_3[j]
+    historic_CO2_4 <- historic_CO2_4 + exp((j - i) / LifeCO2_4) * wetland_out$CO2_4[j]
+    historic_CO2_5 <- historic_CO2_5 + exp((j - i) / LifeCO2_5) * wetland_out$CO2_5[j]
+  }
+  wetland_out$historic_CO2[i] <- historic_CO2_1 + historic_CO2_2 + historic_CO2_3 + historic_CO2_4 + historic_CO2_5
+  wetland_out$RFCO2[i] <- fCO2 * ACO2 * ((wetland_out$historic_CO2[i]))
+  
+  wetland_out$RFC=wetland_out$RFCO2 + wetland_out$RFCH4
+}
+write_csv(wetland_out, "wetland_model.csv")
+```
+
+
+
+#Plot Dual Axis Results.
+```{r dual plot}
+par(mar = c(5.1, 4.1, 2.1, 4.1))
+gs <- glb_sens_summ_combined
+plot(Total_NECB ~ time, data = wetland_out,
+     ylim = range(wetland_out$Total_NECB), xlim = c(1900, 2300),
+     type = "l", lwd = 1.5, lty = 2, col = "black",
+     yaxt = "n", xlab = "Year", ylab = NA)
+axis(4)
+mtext("Cumulative NECB (PgC)", side = 4, line = 2)
+# sd bands
+polygon(x = c(gs$year, rev(gs$year)),
+        y = c(gs$necb_msd, rev(gs$necb_psd)),
+        col = "grey70", border = "transparent")
+# post 2000
+lines(Total_NECB ~ time, data = wetland_out %>% filter(time > 2000),
+      col = "black", lwd = 1.5)
+par(new = TRUE)
+plot(RFCO2 ~ time, data = wetland_out,
+     col = "#e41a1c", type = "l", lwd = 1.5, lty = 2,
+     ylim = c(0, 0.1),
+     xaxt = "n", yaxt = "n", xlab = NA, ylab = NA)
+# post 2000
+lines(RFCO2 ~ time, data = wetland_out %>% filter(time > 2000), 
+      col = "#e41a1c", lwd = 1.5)
+axis(2)
+mtext(expression("Net Radiative Forcing"~(W ~m^2)), side = 2, line = 2)
+lines(RFCH4 ~ time, data = wetland_out, col = "#377eb8", lwd = 1.5, lty = 2)
+# post 2000
+lines(RFCH4 ~ time, data = wetland_out %>% filter(time > 2000),
+      col = "#377eb8", lwd = 1.5)
+legend(x = 1890, y = 0.085, lty = 1, bty = "n",
+       col = c("#e41a1c", "#377eb8", "black"), 
+       legend = c(expression(RF~CO[2]), expression(RF ~ CH[4]),
+                  "NECB (mean±sd)"))
+```

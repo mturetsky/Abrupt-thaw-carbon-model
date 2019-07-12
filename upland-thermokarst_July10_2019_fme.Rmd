@@ -1,0 +1,569 @@
+---
+title: "Hillslope Upland Abrupt Thaw Model using FME as reported by Turetsky et al. (2019) Nature Biogeosciences"
+author: "Merritt Turetsky"
+date: "June 15, 2019"
+output: pdf_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, error = FALSE,
+                      fig.align = "center",
+                      collapse = TRUE, comment = "#>")
+```
+
+```{r libraries}
+library(tidyverse)
+library(FME)
+library(stringr)
+```
+
+# Variable Names
+- *upland_undisturbed* - upland pre-disturbance or 60 years post-abrupt thaw
+- *upland_young* - active feature 1-10 years post-abrupt thaw
+- *upland_old* - stabilized feature 11-60 years post-abrupt thaw
+- *shallow_soil* - delta shallow soil organic carbon (g C m^-2 yr^-1)
+- *deep_soil* - delta deep soil organic carbon  (g C m^-2 yr^-1)
+- *CH4* - methane emissions (g C-CH4 m^-2 yr^-1)
+- *NEE* - net ecosystem exchange of CO2 (g C m^-2 yr^-1)
+- *DOC* - lateral dissolved and particulate organic carbon export flux (g C m^-2 yr^-1)
+- *upland_undisturbed_shallow_soil* - delta shallow soil organic carbon (g C m^2 yr^-1)
+- *upland_undisturbed_deep_soil* - delta deep soil pool (g C m^2 yr^-1)
+- *upland_undisturbed_veg* - loss or gain of C in vegetation, assumed here to be zero
+- *Und_0* - starting undisturbed area in upland model
+- *Young_0* - starting active abrupt thaw area in upland model
+- *Old_0* - starting stabilized abrupt thaw area in upland model
+- *Und* - current undisturbed area in upland model
+- *Old* - current stabilized abrupt thaw area in upland model
+- *Young* - current active abrupt thaw area in upland model
+- *a* - rate at which undisturbed area transitions to active abrupt thaw in upland model
+- *b* - rate at which stabilized thermokarst transitions to undisturbed habitat in upland model
+- *c* - rate at which active thermokarst transitions to stabilized abrupt thaw in upland model
+- *LifeCO2_1* - lifetime values of CO2 pools in years from Frolking and Roulet radiative forcing model
+- *IEMCH4* and *IEMCO2* - indirect effects multiplier from Frolking and Roulet radiative forcing model
+- *RECH4* - radiative efficiency, W m-2 kg-1 from Frolking and Roulet radiative forcing model
+- *FRACO2* and *FRACH4* - fraction of gas into each pool from Frolking and Roulet radiative forcing model
+- *NECB1* - simulates hillslope abrupt thaw C loss based on change in shallow and deep soil pools
+- *NECB2* - simulates hillslope abrupt thaw C loss based on estimated NEE, CH4, and DOC loss including the fraction expected to be reburied or protected during transport. This is addressed using a constant *young_DOCmin*, which is the fraction of carbon allowed to mineralize.  The main difference between *NECB1* and *NECB2* is that *NECB2* considers reburial of permafrost C during erosion and thus is smaller than *NECB1*.  *NECB2* is what is reported in Turetsky et al. 2019 Nature Geoscience
+
+Starting areas are defined within the function
+
+Note that *a* changes through time by increasing by an amount *a_dynamic* which is set as an input parameter
+
+*b* and *c* are fixed and are entered as input paramters to the function.
+
+# Upland model
+##The order that these parameters are introduced is how subsequent lines of code will be calculated. The name of the variable doesn't imply a link to that variable in subsequent code.  Names don't matter, rather the order matters.
+```{r function}
+NECB_model <- function(pars, start_time, end_time) {
+  derivs <- function(time, y, pars) {
+    with (as.list(c(pars, y)), {
+      dUnd <- -a*Und+b*Old
+      dYoung <- a*Und-c*Young
+      dOld <- c*Young-b*Old
+      da <- a_dynamic
+      db <- b_dynamic
+      dUnd_NECB<-((Und*1e6*(undisturbed_shallow_soil+undisturbed_deep_soil+undisturbed_veg)))/1e15
+      dYoung_NECB<-((Young*1e6*(young_shallow_soil+young_deep_soil+young_veg)))/1e15
+      dOld_NECB <-((Old*1e6*(old_shallow_soil+old_deep_soil+old_veg)))/1e15
+      dTotal_NECB<-dYoung_NECB + dOld_NECB + dUnd_NECB
+      dUnd_NECB2<-((Und*1e6*(undisturbed_NEE+undisturbed_CH4+undisturbed_DOC)))/1e15
+      dYoung_NECB2<-((Young*1e6*(young_NEE+young_CH4+(young_DOCmin*young_DOC))))/1e15
+      dOld_NECB2<-((Old*1e6*(old_NEE+old_CH4+old_DOC)))/1e15
+      dTotal_NECB2<-dYoung_NECB2 + dOld_NECB2 + dUnd_NECB2
+      dCH4 <- (((Und*1e6*(undisturbed_CH4+undisturbed_DOC*.03)))/1e15) + (((Young*1e6*(young_CH4+young_DOC*young_DOCmin*.05)))/1e15) + (((Old*1e6*(old_CH4)))/1e15) 
+      dCO2 <- (((Und*1e6*(undisturbed_NEE+undisturbed_DOC*.97)))/1e15) + (((Young*1e6*(young_NEE+young_DOC*young_DOCmin*.95)))/1e15) + (((Old*1e6*(old_NEE)))/1e15) 
+      
+      return(list(c(dUnd, dYoung, dOld, da, db, dUnd_NECB, dYoung_NECB, 
+                    dOld_NECB, dTotal_NECB, dUnd_NECB2, dYoung_NECB2, 
+                    dOld_NECB2, dTotal_NECB2, dCH4, dCO2)))
+    })
+  }
+  y <- with(as.list(pars), {
+    c(Und = Und_0,
+      Young = Young_0,
+      Old = Old_0,
+      a = a_0,
+      b = b_0,
+      Und_NECB = Und_NECB_0,
+      Young_NECB = Young_NECB_0,
+      Old_NECB = Old_NECB_0,
+      Total_NECB = Total_NECB_0,
+      Und_NECB2 = Und_NECB2_0,
+      Young_NECB2 = Young_NECB2_0,
+      Old_NECB2 = Old_NECB2_0,
+      Total_NECB2 = Total_NECB2_0,
+      CH4 = CH4_0,
+      CO2 = CO2_0
+    )
+  })
+  times <- start_time:end_time
+  out <- ode(y = y, parms = pars, times = times, func = derivs)
+  as.data.frame(out)
+}
+```
+
+#Parameter Values for Historical/Static Upland Model
+##This code is used as an informal means of model spin up, mainly so that CO2 and CH4 release from these thaw landscapes do not start at 0 at the beginning of our dynamic measurement period.  In the results reported in Turetsky et al. (2019) we substract carbon emissions from 1900-2000 from our results and focus mainly on emissions from 2000-2300.  Parameters in the historical model run were fitted so that abrupt thaw rates approximated an equilibrium with permafrost recovery at the regional scale. This allows us to explore net ecosystem carbon balance at regional scales under these equilibrium conditions, and then compare changes in net ecosystem carbon balance under accelerated thaw rates in the dynamic measurement period.
+##Dynamic increases in transition rates are set to zero in this simulation
+```{r values for historical measurement period}
+upland_pars_historical <- c(
+  Und_0 = 896350,
+  Young_0 = 2275,
+  Old_0 = 11375,
+  a_0 = 0.0002,
+  a_dynamic = 0,
+  b_0 = 0.02, 
+  b_dynamic = 0,
+  c = 0.1, 
+  Und_NECB_0 = 0,
+  Young_NECB_0 = 0,
+  Old_NECB_0 = 0,
+  Total_NECB_0 = 0,
+  Und_NECB2_0 = 0,
+  Young_NECB2_0 = 0,
+  Old_NECB2_0 = 0,
+  Total_NECB2_0 = 0,
+  undisturbed_shallow_soil = 3.6,
+  undisturbed_deep_soil = 0,
+  undisturbed_veg = 0,
+  undisturbed_NEE = 10.5,
+  undisturbed_CH4 = -4,
+  undisturbed_DOC = -2,
+  young_shallow_soil = -99,
+  young_deep_soil = -2189,
+  young_veg = 0,
+  young_NEE = -95,
+  young_CH4 = -4,
+  young_DOC = -2188,
+  young_DOCmin = 0.6667,
+  old_shallow_soil = 31,
+  old_deep_soil = 1,
+  old_veg = 0,
+  old_NEE = 34,
+  old_CH4 = 0,
+  old_DOC = -2,
+  CH4_0 = 0,
+  CO2_0 = 0,
+  LifeCH4 = 12,
+  LifeCO2_1 = 1.0e8,
+  LifeCO2_2 = 421,
+  LifeCO23 = 70.6,
+  LifeCO24 = 21.4,
+  LifeCO25 = 3.42,
+  IEMCH4 = 1.3,
+  IEMCO2 = 1.0,
+  RECH4 = 1.3e-13,
+  RECO2 = 0.0198e-13,
+  FRACH4 = 1.0,
+  FRACO2_1 = 0.176,
+  FRACO22 = 0.138,
+  FRACO23 = 0.186,
+  FRACO24 = 0.242,
+  FRACO25 = 0.259
+)
+```
+
+#Run Upland Historical/Static Model
+##End point = initial conditions for next model
+```{r run historical measurement period}
+upland_out_historical <- NECB_model(pars = upland_pars_historical, 
+                                    start_time = 1900, end_time = 2000)
+end_values <- filter(upland_out_historical, time == 2000) %>% 
+  select(-time) %>% 
+  gather() %>% 
+  mutate(key = paste0(key, "_0")) %>% 
+  deframe()
+```
+
+#Parameters for the Dynamic Abrupt Thaw Model
+##This includes a dynamic increase in thaw rate to simulate the effects of climate change on permafrost area. The dynamic increase in thaw rate is a_dynamic, which was fitted so that the cumulative change in permafrost area by 2300 matched that of large scale modeling of large-scale gradual thaw reported in McGuire et al. 2018.
+##In Turetsky et al. (2019), the RCP8.5 scenario used an *a_dynamic* of 0.0001 while the RCP4.5 scenario used an *a_dynamic* of 0.00003 to achieve the reductions in total permafrost extent as simulated by large-scale gradual thaw models in McGuire et al. 2018.
+##This code pulls starting values from the end of the 'historical' run of the model
+```{r values for dynamic measurement period}
+upland_pars <- c(
+  end_values,
+  a_0 = 0.0002,
+  a_dynamic = 0.0001,
+  b_0 = 0.02, 
+  b_dynamic = 0,
+  c = 0.1, 
+  undisturbed_shallow_soil = 3.6,
+  undisturbed_deep_soil = 0,
+  undisturbed_veg = 0,
+  undisturbed_NEE = 10.5,
+  undisturbed_CH4 = -4,
+  undisturbed_DOC = -2,
+  young_shallow_soil = -99,
+  young_deep_soil = -2189,
+  young_veg = 0,
+  young_NEE = -95,
+  young_CH4 = -4,
+  young_DOC = -2188,
+  young_DOCmin = 0.6667,
+  old_shallow_soil = 31,
+  old_deep_soil = 1,
+  old_veg = 0,
+  old_NEE = 34,
+  old_CH4 = 0,
+  old_DOC = -2,
+  LifeCH4 = 12,
+  LifeCO2_1 = 1.0e8,
+  LifeCO2_2 = 421,
+  LifeCO23 = 70.6,
+  LifeCO24 = 21.4,
+  LifeCO25 = 3.42,
+  IEMCH4 = 1.3,
+  IEMCO2 = 1.0,
+  RECH4 = 1.3e-13,
+  RECO2 = 0.0198e-13,
+  FRACH4 = 1.0,
+  FRACO2_1 = 0.176,
+  FRACO22 = 0.138,
+  FRACO23 = 0.186,
+  FRACO24 = 0.242,
+  FRACO25 = 0.259
+)
+```
+
+#Run Upland Dynamic Model
+```{r run dynamic measurement period}
+upland_out_dynamic <- NECB_model(pars = upland_pars, start_time = 2000, end_time = 2300)
+upland_out <- rbind(upland_out_historical %>% filter(time < 2000), 
+                    upland_out_dynamic)
+```
+
+#Plot Model Results
+##transform the data into a more practical format
+##rename Und to Undisturbed, Young to Active, Old to Stabilized
+```{r model-ggplot2}
+upland_model_tidy <- upland_out %>% 
+  gather(variable, value, -time) %>% 
+  mutate(variable = if_else(variable == "Und", "Undisturbed permafrost", variable)) %>% 
+  mutate(variable = if_else(variable == "Young", "Active abrupt thaw", variable)) %>% 
+  mutate(variable = if_else(variable == "Old", "Stabilized abrupt thaw", variable)) 
+
+# area
+plot_vars <- c("Undisturbed permafrost", "Active abrupt thaw", "Stabilized abrupt thaw")
+plot_data <- upland_model_tidy %>% 
+  filter(variable %in% plot_vars) %>% 
+  mutate(variable = factor(variable, levels = plot_vars))
+upland_area_fig<- ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(data = filter(plot_data, time >= 2000), size = 1.5) +
+  scale_color_manual(NULL, breaks = plot_vars,
+                     values = c("#e41a1c", "#377eb8", "#4daf4a")) +
+  scale_y_continuous(label = scales::comma) +
+  labs(x = "Year", y = bquote("Upland Hillslope Area"~(km^2))) +
+  theme(axis.text=element_text(size=20),
+        axis.title=element_text(size=22),
+        legend.text = element_text(size=18),
+        legend.position= c(0.8, 0.83),
+        plot.margin = margin(.8, .8, .8, .8, "cm"), 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+print(upland_area_fig)
+
+pdf(file="upland_area_fig.pdf", width=9, height=6, family="Helvetica")
+upland_area_fig
+dev.off()
+
+# NECB2
+plot_vars <- c("Und_NECB2", "Young_NECB2", "Old_NECB2", "Total_NECB2")
+plot_lbls <- c("Undisturbed Permafrost", "Active abrupt thaw", "Stabilized abrupt thaw", "Total")
+plot_data <- upland_model_tidy %>% 
+  filter(variable %in% plot_vars) %>% 
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(data = filter(plot_data, time >= 2000), size = 1.5) +
+  geom_hline(yintercept = 0) +
+  scale_color_manual(NULL, breaks = plot_vars, labels = plot_lbls,
+                     values = c("#e41a1c", "#377eb8", "#4daf4a", "black")) +
+  labs(x = "Year", y = "Cumulative Net Ecosystem Carbon Balance (Pg C)") +
+    theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+# CO2 CH4
+plot_vars <- c("CO2", "CH4", "Total_NECB2")
+plot_lbls <- c(expression(CO[2]), expression(CH[4]), "NECB")
+plot_data <- upland_model_tidy %>% 
+  filter(variable %in% plot_vars) %>% 
+  mutate(variable = factor(variable, levels = plot_vars))
+ggplot(plot_data, aes(x = time, y = value, color = variable)) +
+  geom_line(size = 1.5, linetype = "dashed") +
+  geom_line(data = filter(plot_data, time >= 2000), size = 1.5) +
+  geom_hline(yintercept = 0) +
+  scale_color_manual(NULL, breaks = plot_vars, labels = plot_lbls,
+                     values = c("#e41a1c", "#377eb8", "black")) +
+  labs(x = "Year", y = bquote("Cumulative Upland Abrupt Thaw"~CO[2]~or~CH[4]~"(Pg C)")) +
+  theme(legend.position = "bottom",
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+ggplot(data = upland_out, mapping = aes(x = time, y = a)) +
+  geom_line(data = filter(upland_out, time >= 2000), color="black") +
+  labs(x = "Year", y = "Change in Upland Abrupt Thaw Rate over Time") +
+  
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+
+#Local Sensistivity Upland Model
+##Run a local sensitivity analysis for NECB2. After running the sensitivity analysis, transform the data to a format more conducive to analysis and plotting.
+```{r local sensitivity NECB2}
+sp <- c("Und_0", "Young_0", "Old_0", "a_0", "a_dynamic", "c", "b_0",
+        "undisturbed_shallow_soil", "undisturbed_deep_soil",
+        "young_shallow_soil", "young_deep_soil", 
+        "old_shallow_soil", "old_deep_soil")
+SnsThermokarst <- sensFun(func = NECB_model, parms = upland_pars, 
+                          start_time=1900, end_time=2300, 
+                          senspar = sp, 
+                          sensvar = "Total_NECB2", varscale = -1)
+thermokarst_loc_sens <- SnsThermokarst %>% 
+  gather(parameter, sensitivity, -x, -var) %>% 
+  rename(year = x, variable = var) %>% 
+  mutate(sensitivity = if_else(variable == "Total_NECB2", -sensitivity, 
+                               sensitivity))
+thermokarst_loc_sens <- thermokarst_loc_sens %>% 
+  mutate(thermokarst_type = str_extract(parameter, "^[a-zA-Z]+"),
+         carbon_source = str_extract(parameter, "(?<=_).+")) %>% 
+  mutate(thermokarst_type = recode(thermokarst_type, 
+                                   Und = "undisturbed",
+                                   Young = "young",
+                                   Old = "old"))
+write_csv(thermokarst_loc_sens, "upland_local-sensitivity.csv")
+tk_type_var <- c("undisturbed", "young", "old")
+tk_type_lbl <- c("Undisturbed", "Active", "Stabilized")
+source_var <- c("0", "deep_soil", "shallow_soil", "veg")
+source_lbl <- c("Initial value", "Deep soil C", "Shallow soil C", "Vegetation C")
+necb_tk_types <- thermokarst_loc_sens %>% 
+  filter(variable == "Total_NECB2",
+         thermokarst_type %in% tk_type_var) %>% 
+  mutate(thermokarst_type = factor(thermokarst_type, levels = tk_type_var))
+ggplot(necb_tk_types, aes(x = year, y = sensitivity)) +
+  geom_line(aes(colour = carbon_source, linetype = thermokarst_type), size = 1) +
+  scale_color_brewer(NULL, palette = "Set1",
+                     breaks = source_var, labels = source_lbl) +
+  scale_linetype_manual(NULL, breaks = tk_type_var, labels = tk_type_lbl,
+                        values = 1:3) +
+  ylim(-2, 2) +
+  labs(title = "Local sensitivity analsyis for upland thermokarst NECB", 
+       x = "Year", y = "Sensitivity") + 
+    theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+# Average local sensitivity results over years to produce a bar plot
+```{r local sensitivity avg-yr}
+sens_summ <- bind_rows(
+  thermokarst_loc_sens %>% 
+    filter(variable == "Total_NECB", year >= 2000, year <= 2100) %>% 
+    group_by(parameter) %>% 
+    summarize(sens_mean = mean(sensitivity),
+              sens_se = sd(sensitivity) / n()) %>% 
+    mutate(period = "2000-2100"),
+  thermokarst_loc_sens %>% 
+    filter(variable == "Total_NECB", year >= 2000, year <= 2300) %>% 
+    group_by(parameter) %>% 
+    summarize(sens_mean = mean(sensitivity),
+              sens_se = sd(sensitivity) / n()) %>% 
+    mutate(period = "2000-2300")
+)
+ggplot(sens_summ, aes(x = parameter, y = sens_mean)) +
+  geom_point() +
+  coord_flip() +
+  facet_wrap(~ period) +
+  labs(x = "Parameters", y = "Sensitivity",
+       title = "Mean local sensitivity for upland abrupt thaw NECB") +
+theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+
+```
+
+#Global Sensistivity Upland Model
+##This analysis considers uncertainties for the most important sensitivity parameters
+##Output is transformed and plotted in ggplot2.
+```{r}
+sense_pars_n <- c("c", "Und_0", "young_deep_soil", "a_dynamic", 
+                  "young_shallow_soil", "old_shallow_soil")
+par_ranges_n <- upland_pars[sense_pars_n] %>% 
+  enframe() %>% 
+  mutate(min = value - 0.4 * value, max = value + 0.4 * value) %>% 
+  select(min, max) %>% 
+  as.data.frame()
+rownames(par_ranges_n) <- sense_pars_n
+sR <- sensRange(func = NECB_model, parms = upland_pars, dist = "grid",
+                start_time = 2000, end_time = 2300, 
+                sensvar = "Total_NECB2", parRange = par_ranges_n, 
+                num = 3^nrow(par_ranges_n))
+
+thermokarst_glb_sens <- sR %>% 
+  gather(year, necb, -one_of(rownames(par_ranges_n))) %>% 
+  mutate(year = str_extract(year, "[0-9]{4}$") %>% parse_number()) %>% 
+  select(year, everything())
+
+glb_sens_summ <- thermokarst_glb_sens %>% 
+  group_by(year) %>% 
+  summarize(necb_mean = mean(necb),
+            necb_min = min(necb), necb_max = max(necb),
+            necb_sd = sd(necb)) %>% 
+  ungroup() %>% 
+  mutate(necb_psd = necb_mean + necb_sd, necb_msd = necb_mean - necb_sd)
+write_csv(thermokarst_glb_sens, "upland_global-sensitivity.csv")
+write_csv(glb_sens_summ, "upland_global-sensitivity_summary.csv")
+ggplot(glb_sens_summ, aes(x = year)) +
+  geom_ribbon(aes(ymin = necb_msd, ymax = necb_psd), alpha = 0.2) +
+  geom_line(aes(y = necb_mean), linetype = "dashed") +
+  labs(title = "Uncertainty in Hillslope Terrain NECB",
+       x = "Year", y = "NECB (PgC)") +
+  theme(legend.position = "bottom", 
+        legend.key=element_rect(fill=NA,colour=NA),
+        panel.border=element_blank(),
+        axis.line=element_line(),
+        panel.background=element_rect(fill="white"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+# Take CH4 data from output of model (upland_out) and calculate radiative forcing
+## #CH_4 and CO_2 started in PgC/km2 terrain and now are converted to gC/m2
+## Fluxes need to be summed up across the area of interest (i.e. 900,900 km2) and expressed in kg; positive fluxes are net release to the atmosphere and negative fluxes are net uptake from the atmosphere. 
+## Ensure that fluxes are expressed in CO2 and CH4 (1 g C-CO2 = 44/12 g CO2; 1g C-CH4 = 16/12 g CH4.
+## Below we are calculating the rate of CH4 and CO2 inputs specific to a year.  This is to allow me to estimate instantaneous RF that takes into the account the current year's perturbation to the atmosphere plus the legacy of previous years.
+## length equals 300 yrs
+## n represents duration of model run up to 2300 in years
+## j is the cohort and i is the year of that cohort's effect
+## historic_CH4 starts at zero, effects are summed over time because we are taking one time step and adding in the next year's flux
+```{r radiative forcing}
+upland_out$CH4g_m2 <- upland_out$CH4*10^9/900900
+upland_out$CO2g_m2 <- upland_out$CO2*10^9/900900
+upland_out$CH4_kg <- upland_out$CH4g_m2 * -1 * 16/12 * 900900 * 1000 * 1000 / 1000
+upland_out$CO2_kg <- upland_out$CO2g_m2 * -1 * 44/12 * 900900 * 1000 * 1000 / 1000
+fCH4 <- 1.3     
+ACH4 <-  1.3e-13  
+LifeCH4 <- 12
+n <- length(upland_out$time)
+upland_out$delta_CH4_kg[1]<-0
+upland_out$delta_CO2_kg[1]<-0
+for (t in 2:length(upland_out$time)){
+  upland_out$delta_CH4_kg[t] = upland_out$CH4_kg[t]-upland_out$CH4_kg[t-1]
+  upland_out$delta_CO2_kg[t] = upland_out$CO2_kg[t]-upland_out$CO2_kg[t-1]
+  
+}
+
+# RF METHANE
+for (i in 1:n) {
+  historic_CH4 <- 0
+  for (j in 1:i) {
+    historic_CH4 <- historic_CH4 + upland_out$delta_CH4_kg[j] * exp((j - i) / LifeCH4) 
+  }
+  upland_out$historic_CH4[i] <- historic_CH4
+  upland_out$RFCH4[i] <- fCH4 * ACH4 * ((historic_CH4))
+}
+
+# RF CARBON DIOXIDE
+fCO2 <- 1
+ACO2 <- 0.0198e-13  
+LifeCO2_1 <- 1e8
+LifeCO2_2 <- 421
+LifeCO2_3 <- 71
+LifeCO2_4 <- 21
+LifeCO2_5 <- 3.4
+
+n <- length(upland_out$time)
+
+upland_out$CO2_1 <- upland_out$delta_CO2_kg * 0.176
+upland_out$CO2_2 <- upland_out$delta_CO2_kg * 0.138
+upland_out$CO2_3 <- upland_out$delta_CO2_kg * 0.186
+upland_out$CO2_4 <- upland_out$delta_CO2_kg * 0.242
+upland_out$CO2_5 <- upland_out$delta_CO2_kg * 0.259
+
+for (i in 1:n) {
+  historic_CO2_1 <- 0
+  historic_CO2_2 <- 0
+  historic_CO2_3 <- 0
+  historic_CO2_4 <- 0
+  historic_CO2_5 <- 0
+
+  for (j in 1:i) {
+    historic_CO2_1 <- historic_CO2_1 + exp((j - i) / LifeCO2_1) * upland_out$CO2_1[j]
+    historic_CO2_2 <- historic_CO2_2 + exp((j - i) / LifeCO2_2) * upland_out$CO2_2[j]
+    historic_CO2_3 <- historic_CO2_3 + exp((j - i) / LifeCO2_3) * upland_out$CO2_3[j]
+    historic_CO2_4 <- historic_CO2_4 + exp((j - i) / LifeCO2_4) * upland_out$CO2_4[j]
+    historic_CO2_5 <- historic_CO2_5 + exp((j - i) / LifeCO2_5) * upland_out$CO2_5[j]
+  }
+  upland_out$historic_CO2[i] <- historic_CO2_1 + historic_CO2_2 + historic_CO2_3 + historic_CO2_4 + historic_CO2_5
+  upland_out$RFCO2[i] <- fCO2 * ACO2 * ((upland_out$historic_CO2[i]))
+  
+  upland_out$RFC=upland_out$RFCO2 + upland_out$RFCH4
+}
+write_csv(upland_out, "upland_model.csv")
+```
+
+# Dual axis plot- NECB2 versus RF CO2 and RF CH4
+```{r dual plot}
+par(mar = c(5.1, 4.1, 2.1, 4.1))
+gs <- glb_sens_summ
+plot(Total_NECB2 ~ time, data = upland_out,
+     ylim = range(upland_out$Total_NECB2), xlim = c(1900, 2300),
+     type = "l", lwd = 1.5, lty = 2, col = "black",
+     yaxt = "n", xlab = "Year", ylab = NA)
+axis(4)
+mtext("Cumulative NECB (PgC)", side = 4, line = 2)
+# sd bands
+polygon(x = c(gs$year, rev(gs$year)),
+        y = c(gs$necb_msd, rev(gs$necb_psd)),
+        col = "grey70", border = "transparent")
+lines(Total_NECB2 ~ time, data = upland_out %>% filter(time > 2000),
+      col = "black", lwd = 1.5)
+par(new = TRUE)
+plot(RFCO2 ~ time, data = upland_out,
+     col = "#e41a1c", type = "l", lwd = 1.5, lty = 2,
+     ylim = c(-0.01, .1),
+     xaxt = "n", yaxt = "n", xlab = NA, ylab = NA)
+lines(RFCO2 ~ time, data = upland_out %>% filter(time > 2000), 
+      col = "#e41a1c", lwd = 1.5)
+axis(2)
+mtext(expression("Net Radiative Forcing"~(W ~m^2 ~yr^-1)), side = 2, line = 2)
+lines(RFCH4 ~ time, data = upland_out, col = "#377eb8", lwd = 1.5, lty = 2)
+# post 2000
+lines(RFCH4 ~ time, data = upland_out %>% filter(time > 2000),
+      col = "#377eb8", lwd = 1.5)
+legend(x = 1900, y = 0.13, lty = 1, bty = "n",
+       col = c("#e41a1c", "#377eb8", "black"), 
+       legend = c(expression(RF~CO[2]), expression(RF ~ CH[4]), "NECB (mean±sd)"))
+```
+
